@@ -10,8 +10,10 @@
 package com.facebook.imagepipeline.backends.okhttp;
 
 import java.io.IOException;
+import java.util.concurrent.Executor;
 
 import android.net.Uri;
+import android.os.Looper;
 
 import com.facebook.common.logging.FLog;
 import com.facebook.common.references.CloseableReference;
@@ -45,6 +47,8 @@ public class OkHttpNetworkFetchProducer extends NetworkFetchProducer<NfpRequestS
   private final OkHttpClient mOkHttpClient;
   private final boolean mCancellable;
 
+  private Executor mCancellationExecutor;
+
   /**
    * @param okHttpClient client to use
    * @param cancellable whether to allow cancellation of submitted requests
@@ -56,9 +60,28 @@ public class OkHttpNetworkFetchProducer extends NetworkFetchProducer<NfpRequestS
       boolean cancellable,
       PooledByteBufferFactory pooledByteBufferFactory,
       ByteArrayPool byteArrayPool) {
+    this(okHttpClient, cancellable, pooledByteBufferFactory, byteArrayPool, null);
+  }
+
+  /**
+   * @param okHttpClient client to use
+   * @param cancellable whether to allow cancellation of submitted requests
+   * @param pooledByteBufferFactory pooled byte buffer factory
+   * @param byteArrayPool pool for stream input/ouptut buffering
+   * @param backgroundExecutor executor for cancellation in background
+   */
+  public OkHttpNetworkFetchProducer(
+      OkHttpClient okHttpClient,
+      boolean cancellable,
+      PooledByteBufferFactory pooledByteBufferFactory,
+      ByteArrayPool byteArrayPool, Executor cancellationExecutor) {
     super(pooledByteBufferFactory, byteArrayPool);
     mOkHttpClient = okHttpClient;
     mCancellable = cancellable;
+    mCancellationExecutor = cancellationExecutor;
+    if (mCancellable && mCancellationExecutor == null) {
+      mCancellationExecutor = okHttpClient.getDispatcher().getExecutorService();
+    }
   }
 
   @Override
@@ -83,7 +106,16 @@ public class OkHttpNetworkFetchProducer extends NetworkFetchProducer<NfpRequestS
           new BaseProducerContextCallbacks() {
             @Override
             public void onCancellationRequested() {
-              call.cancel();
+              // Avoid NetworkOnMainThreadException
+              if (Looper.myLooper() != Looper.getMainLooper()) {
+                call.cancel();
+              } else {
+                mCancellationExecutor.execute(new Runnable() {
+                  @Override public void run() {
+                    call.cancel();
+                  }
+                });
+              }
             }
           });
     }
